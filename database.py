@@ -187,9 +187,10 @@ class Database:
         cursor.execute(f'''
             SELECT user_id, username, first_name 
             FROM users 
-            WHERE contact_provided = 0 
+            WHERE status = 'offer_sent'
+            AND contact_provided = 0 
             AND {warmup_column} = 0
-            AND datetime(last_message_time, '+{hours} hours') <= datetime('now')
+            AND datetime(last_message_time, '+{hours} hours') <= datetime('now', 'localtime')
         ''')
         
         users = []

@@ -18,6 +18,7 @@ from telegram.ext import (
 from telegram.error import TelegramError
 
 import config
+import config_timing
 from database import Database
 import messages
 
@@ -106,7 +107,8 @@ async def send_offer_delayed(application, user_id: int, delay: int = 60):
             text=messages.OFFER_MESSAGE
         )
         
-        db.update_user_status(user_id, 'offer_sent')
+        # Обновляем last_message_time - первый догрев будет через 1 минуту после предложения
+        db.update_user_status(user_id, 'offer_sent', update_time=True)
         logger.info(f"Предложение отправлено пользователю {user_id}")
         
     except TelegramError as e:
@@ -151,8 +153,8 @@ async def handle_antistress_code(update: Update, context: ContextTypes.DEFAULT_T
         logger.info(f"Новый пользователь добавлен: {user_id} (@{user.username})")
         
         # Запускаем отложенную отправку предложения консультации
-        asyncio.create_task(send_offer_delayed(context.application, user_id, delay=60))
-        logger.info(f"Запланирована отправка предложения через 1 минуту для {user_id}")
+        asyncio.create_task(send_offer_delayed(context.application, user_id, delay=config_timing.OFFER_DELAY_SECONDS))
+        logger.info(f"Запланирована отправка предложения через {config_timing.OFFER_DELAY_SECONDS} сек для {user_id}")
         
     except Exception as e:
         logger.error(f"Ошибка при отправке файла: {e}")
@@ -242,6 +244,11 @@ async def handle_contact_message(update: Update, context: ContextTypes.DEFAULT_T
     if not user_info:
         return False
     
+    # Проверяем, получил ли пользователь предложение консультации
+    if user_info['status'] == 'file_sent':
+        # Предложение еще не отправлено - игнорируем сообщение
+        return False
+    
     # Если уже оставил контакт, пропускаем
     if user_info['contact_provided']:
         return False
@@ -318,23 +325,46 @@ async def notify_admin_about_contact(context, user_id, name, phone, username):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     message_text = update.message.text.strip()
+    user_id = update.effective_user.id
     
     # Проверяем кодовое слово (нечувствительно к регистру)
     if message_text.lower() == config.CODE_WORD.lower():
         await handle_antistress_code(update, context)
         return
     
-    # Пытаемся обработать как контактную информацию
-    contact_handled = await handle_contact_message(update, context)
+    # Проверяем, есть ли пользователь в базе
+    user_info = db.get_user_info(user_id)
     
-    if not contact_handled:
-        # Если не кодовое слово и не контакт, даем подсказку
-        user_info = db.get_user_info(update.effective_user.id)
-        if user_info and not user_info['contact_provided']:
-            await update.message.reply_text(
-                "Пожалуйста, отправьте ваше имя и номер телефона для консультации.\n"
-                "Например: Иван Петров +79991234567"
-            )
+    # Если пользователь уже в базе, пытаемся обработать как контакт
+    if user_info:
+        # Проверяем, получил ли пользователь предложение консультации
+        if user_info['status'] == 'file_sent':
+            # Предложение еще не отправлено - не обрабатываем сообщения
+            return
+        
+        contact_handled = await handle_contact_message(update, context)
+        
+        if not contact_handled:
+            # Если контакт уже предоставлен
+            if user_info['contact_provided']:
+                await update.message.reply_text(
+                    "Спасибо! Мы уже получили ваши контакты и скоро свяжемся с вами.\n\n"
+                    "Если у вас есть вопросы, можете написать администратору."
+                )
+            else:
+                # Контакт еще не предоставлен, даем подсказку
+                await update.message.reply_text(
+                    "Пожалуйста, отправьте ваше имя и номер телефона для консультации.\n\n"
+                    "📝 Формат: Имя Фамилия +79991234567\n"
+                    "Например: Иван Петров +79991234567"
+                )
+    else:
+        # Пользователь не в базе - неверное кодовое слово
+        await update.message.reply_text(
+            "❌ Неверное кодовое слово.\n\n"
+            "Пожалуйста, введите правильное кодовое слово, чтобы получить доступ к материалам.\n\n"
+            "Если вы не знаете кодовое слово, обратитесь к организатору программы."
+        )
 
 
 async def check_warmup_users(application):
@@ -343,8 +373,8 @@ async def check_warmup_users(application):
         try:
             logger.info("Проверка пользователей для догрева...")
             
-            # Первый догрев (через 24 часа)
-            users_for_warmup1 = db.get_users_for_warmup(hours=24, warmup_number=1)
+            # Первый догрев
+            users_for_warmup1 = db.get_users_for_warmup(hours=config_timing.WARMUP_1_HOURS, warmup_number=1)
             logger.info(f"Найдено {len(users_for_warmup1)} пользователей для первого догрева")
             
             for user in users_for_warmup1:
@@ -358,8 +388,8 @@ async def check_warmup_users(application):
                 except TelegramError as e:
                     logger.error(f"Ошибка отправки первого догрева {user['user_id']}: {e}")
             
-            # Второй догрев (через 72 часа)
-            users_for_warmup2 = db.get_users_for_warmup(hours=72, warmup_number=2)
+            # Второй догрев
+            users_for_warmup2 = db.get_users_for_warmup(hours=config_timing.WARMUP_2_HOURS, warmup_number=2)
             logger.info(f"Найдено {len(users_for_warmup2)} пользователей для второго догрева")
             
             for user in users_for_warmup2:
@@ -376,8 +406,8 @@ async def check_warmup_users(application):
         except Exception as e:
             logger.error(f"Ошибка в фоновой задаче догрева: {e}")
         
-        # Проверяем каждый час
-        await asyncio.sleep(3600)
+        # Проверяем с интервалом из конфига
+        await asyncio.sleep(config_timing.CHECK_INTERVAL_SECONDS)
 
 
 # ===== КОМАНДЫ АДМИНИСТРАТОРА =====
