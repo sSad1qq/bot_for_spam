@@ -1,8 +1,11 @@
 """
-Telegram бот для отправки PDF файлов и рассылки
+Telegram бот - воронка "Антистресс"
 """
 import logging
 import os
+import re
+import asyncio
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,6 +19,7 @@ from telegram.error import TelegramError
 
 import config
 from database import Database
+import messages
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,13 +36,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
     
-    welcome_message = (
-        f"Привет, {user.first_name}! 👋\n\n"
-        f"Я бот для отправки специальных материалов.\n"
-        f"Введите кодовое слово, чтобы получить доступ к материалам."
+    welcome_text = (
+        f"Здравствуйте, {user.first_name}! 👋\n\n"
+        f"Рады приветствовать вас в программе поддержки от Эталона!\n\n"
+        f"📚 Мы подготовили для вас полезные материалы по управлению стрессом "
+        f"и тревожностью в период подготовки к экзаменам.\n\n"
+        f"🔑 Чтобы получить материалы, напишите кодовое слово.\n\n"
+        f"После этого вы получите доступ к файлу с практическими инструментами "
+        f"и специальное предложение от нашего психолога."
     )
     
-    await update.message.reply_text(welcome_message)
+    await update.message.reply_text(welcome_text)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,28 +54,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📚 Доступные команды:\n\n"
         "/start - Начать работу с ботом\n"
-        "/help - Показать это сообщение\n"
-        "/unsubscribe - Отписаться от рассылки\n\n"
-        "Введите кодовое слово, чтобы получить PDF файл и подписаться на рассылку."
+        "/help - Показать это сообщение\n\n"
+        "Введите кодовое слово **Антистресс**, чтобы получить полезные материалы."
     )
     
     await update.message.reply_text(help_text)
-
-
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /unsubscribe"""
-    user_id = update.effective_user.id
-    
-    if db.is_user_exists(user_id):
-        db.unsubscribe_user(user_id)
-        await update.message.reply_text(
-            "✅ Вы успешно отписались от рассылки.\n"
-            "Вы можете снова подписаться, введя кодовое слово."
-        )
-    else:
-        await update.message.reply_text(
-            "Вы ещё не подписаны на рассылку."
-        )
 
 
 async def check_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,20 +66,279 @@ async def check_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username
     
+    user_info = db.get_user_info(user_id)
+    
     message = (
         f"🆔 Ваша информация:\n\n"
         f"ID: {user_id}\n"
         f"Username: @{username or 'не указан'}\n"
         f"Имя: {update.effective_user.first_name}\n\n"
         f"ADMIN_ID в боте: {config.ADMIN_ID}\n"
-        f"Вы админ: {'✅ ДА' if user_id == config.ADMIN_ID else '❌ НЕТ'}"
+        f"Вы админ: {'✅ ДА' if user_id == config.ADMIN_ID else '❌ НЕТ'}\n\n"
     )
+    
+    if user_info:
+        message += (
+            f"Статус в воронке: {user_info['status']}\n"
+            f"Контакт предоставлен: {'✅ ДА' if user_info['contact_provided'] else '❌ НЕТ'}"
+        )
+    else:
+        message += "Вы ещё не в базе. Введите кодовое слово **Антистресс**."
     
     await update.message.reply_text(message)
 
 
+async def send_offer_delayed(application, user_id: int, delay: int = 60):
+    """Отправка предложения консультации через заданную задержку"""
+    await asyncio.sleep(delay)
+    
+    logger.info(f"Отправка предложения консультации пользователю {user_id}")
+    
+    try:
+        # Проверяем, не оставил ли пользователь уже контакт
+        user_info = db.get_user_info(user_id)
+        if user_info and user_info['contact_provided']:
+            logger.info(f"Пользователь {user_id} уже оставил контакт, пропускаем")
+            return
+        
+        await application.bot.send_message(
+            chat_id=user_id,
+            text=messages.OFFER_MESSAGE
+        )
+        
+        db.update_user_status(user_id, 'offer_sent')
+        logger.info(f"Предложение отправлено пользователю {user_id}")
+        
+    except TelegramError as e:
+        logger.error(f"Не удалось отправить предложение пользователю {user_id}: {e}")
+
+
+async def handle_antistress_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кодового слова Антистресс"""
+    user = update.effective_user
+    user_id = user.id
+    
+    # Проверяем, существует ли PDF файл
+    if not os.path.exists(config.PDF_FILE_PATH):
+        await update.message.reply_text(
+            "❌ Извините, файл пока недоступен. Обратитесь к администратору."
+        )
+        logger.error(f"PDF файл не найден: {config.PDF_FILE_PATH}")
+        return
+    
+    # Проверяем, новый ли это пользователь
+    is_new_user = db.add_user(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
+    
+    if not is_new_user:
+        await update.message.reply_text(
+            "Вы уже получали материалы! Если у вас остались вопросы, напишите администратору."
+        )
+        return
+    
+    # Отправляем приветственное сообщение
+    await update.message.reply_text(messages.WELCOME_MESSAGE)
+    
+    # Отправляем PDF файл
+    try:
+        with open(config.PDF_FILE_PATH, 'rb') as pdf_file:
+            await update.message.reply_document(document=pdf_file)
+        
+        logger.info(f"Новый пользователь добавлен: {user_id} (@{user.username})")
+        
+        # Запускаем отложенную отправку предложения консультации
+        asyncio.create_task(send_offer_delayed(context.application, user_id, delay=60))
+        logger.info(f"Запланирована отправка предложения через 1 минуту для {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке файла: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при отправке файла. Попробуйте позже."
+        )
+
+
+def extract_contact_info(text: str) -> tuple:
+    """
+    Извлечение имени и телефона из текста
+    
+    Returns:
+        (name, phone) или (None, None) если не найдено
+    """
+    # Ищем номер телефона (различные форматы)
+    phone_patterns = [
+        r'\+?7[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}',  # +7 (xxx) xxx-xx-xx
+        r'\+?\d{11,14}',  # Просто цифры
+        r'8[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}',  # 8 (xxx) xxx-xx-xx
+    ]
+    
+    phone = None
+    for pattern in phone_patterns:
+        match = re.search(pattern, text)
+        if match:
+            phone = match.group().strip()
+            # Удаляем телефон из текста, чтобы извлечь имя
+            text = text.replace(match.group(), '').strip()
+            break
+    
+    if not phone:
+        return None, None
+    
+    # Очищаем телефон
+    phone = re.sub(r'[\s\-\(\)]', '', phone)
+    
+    # Имя - это то, что осталось после удаления телефона
+    # Очищаем от лишних символов и пробелов
+    name = re.sub(r'[^\w\s\-А-Яа-яЁёA-Za-z]', '', text).strip()
+    
+    if not name:
+        return None, phone
+    
+    return name, phone
+
+
+async def handle_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка контакта от пользователя"""
+    user_id = update.effective_user.id
+    
+    # Проверяем, есть ли пользователь в базе
+    user_info = db.get_user_info(user_id)
+    if not user_info:
+        return False
+    
+    # Если уже оставил контакт, пропускаем
+    if user_info['contact_provided']:
+        return False
+    
+    # Обработка контакта через Telegram Contact
+    if update.message.contact:
+        phone = update.message.contact.phone_number
+        name = update.message.contact.first_name or update.effective_user.first_name
+        
+        db.save_contact(user_id, name, phone)
+        
+        # Отправляем благодарность
+        await update.message.reply_text(messages.THANK_YOU_MESSAGE)
+        
+        # Уведомляем админа
+        await notify_admin_about_contact(context, user_id, name, phone, update.effective_user.username)
+        
+        logger.info(f"Получен контакт от {user_id}: {name}, {phone}")
+        return True
+    
+    # Обработка текстового сообщения с именем и телефоном
+    if update.message.text:
+        name, phone = extract_contact_info(update.message.text)
+        
+        if name and phone:
+            db.save_contact(user_id, name, phone)
+            
+            # Отправляем благодарность
+            await update.message.reply_text(messages.THANK_YOU_MESSAGE)
+            
+            # Уведомляем админа
+            await notify_admin_about_contact(context, user_id, name, phone, update.effective_user.username)
+            
+            logger.info(f"Получен контакт от {user_id}: {name}, {phone}")
+            return True
+    
+    return False
+
+
+async def notify_admin_about_contact(context, user_id, name, phone, username):
+    """Отправка уведомления админу о новом контакте"""
+    if not config.ADMIN_ID:
+        return
+    
+    try:
+        notification = messages.ADMIN_NOTIFICATION.format(
+            name=name,
+            phone=phone,
+            user_id=user_id,
+            username=username or 'не указан',
+            date=datetime.now().strftime('%d.%m.%Y %H:%M')
+        )
+        
+        await context.bot.send_message(
+            chat_id=config.ADMIN_ID,
+            text=notification
+        )
+    except TelegramError as e:
+        logger.error(f"Не удалось уведомить админа: {e}")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений"""
+    message_text = update.message.text.strip()
+    
+    # Проверяем кодовое слово (нечувствительно к регистру)
+    if message_text.lower() == config.CODE_WORD.lower():
+        await handle_antistress_code(update, context)
+        return
+    
+    # Пытаемся обработать как контактную информацию
+    contact_handled = await handle_contact_message(update, context)
+    
+    if not contact_handled:
+        # Если не кодовое слово и не контакт, даем подсказку
+        user_info = db.get_user_info(update.effective_user.id)
+        if user_info and not user_info['contact_provided']:
+            await update.message.reply_text(
+                "Пожалуйста, отправьте ваше имя и номер телефона для консультации.\n"
+                "Например: Иван Петров +79991234567"
+            )
+
+
+async def check_warmup_users(application):
+    """Фоновая задача для проверки и отправки догревающих сообщений"""
+    while True:
+        try:
+            logger.info("Проверка пользователей для догрева...")
+            
+            # Первый догрев (через 24 часа)
+            users_for_warmup1 = db.get_users_for_warmup(hours=24, warmup_number=1)
+            logger.info(f"Найдено {len(users_for_warmup1)} пользователей для первого догрева")
+            
+            for user in users_for_warmup1:
+                try:
+                    await application.bot.send_message(
+                        chat_id=user['user_id'],
+                        text=messages.WARMUP_1_MESSAGE
+                    )
+                    db.mark_warmup_sent(user['user_id'], 1)
+                    logger.info(f"Первый догрев отправлен пользователю {user['user_id']}")
+                except TelegramError as e:
+                    logger.error(f"Ошибка отправки первого догрева {user['user_id']}: {e}")
+            
+            # Второй догрев (через 72 часа)
+            users_for_warmup2 = db.get_users_for_warmup(hours=72, warmup_number=2)
+            logger.info(f"Найдено {len(users_for_warmup2)} пользователей для второго догрева")
+            
+            for user in users_for_warmup2:
+                try:
+                    await application.bot.send_message(
+                        chat_id=user['user_id'],
+                        text=messages.WARMUP_2_MESSAGE
+                    )
+                    db.mark_warmup_sent(user['user_id'], 2)
+                    logger.info(f"Второй догрев отправлен пользователю {user['user_id']}")
+                except TelegramError as e:
+                    logger.error(f"Ошибка отправки второго догрева {user['user_id']}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Ошибка в фоновой задаче догрева: {e}")
+        
+        # Проверяем каждый час
+        await asyncio.sleep(3600)
+
+
+# ===== КОМАНДЫ АДМИНИСТРАТОРА =====
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /stats - только для админа"""
+    """Статистика по воронке"""
     user_id = update.effective_user.id
     
     if user_id != config.ADMIN_ID:
@@ -96,61 +346,103 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     total_users = db.get_user_count()
-    subscribers = db.get_subscriber_count()
+    with_contact = db.get_contact_count()
+    without_contact = total_users - with_contact
     
     stats_text = (
-        f"📊 Статистика бота:\n\n"
+        f"📊 Статистика воронки \"Антистресс\":\n\n"
         f"👥 Всего пользователей: {total_users}\n"
-        f"✅ Активных подписчиков: {subscribers}\n"
-        f"❌ Отписавшихся: {total_users - subscribers}"
+        f"✅ Оставили контакт: {with_contact}\n"
+        f"⏳ Без контакта: {without_contact}\n"
+        f"📈 Конверсия: {round(with_contact / total_users * 100, 1) if total_users > 0 else 0}%"
     )
     
     await update.message.reply_text(stats_text)
 
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработчик команды /broadcast - рассылка сообщения всем подписчикам
-    Только для админа
-    
-    Использование: /broadcast <текст сообщения>
-    """
+async def broadcast_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка всем пользователям"""
     user_id = update.effective_user.id
     
     if user_id != config.ADMIN_ID:
         await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     
-    # Получаем текст сообщения после команды
     if not context.args:
         await update.message.reply_text(
-            "Использование: /broadcast <текст сообщения>\n"
-            "Например: /broadcast Привет всем! Это тестовое сообщение."
+            "Использование: /broadcast_all <текст сообщения>\n"
+            "Отправит сообщение ВСЕМ пользователям воронки"
         )
         return
     
     message_text = ' '.join(context.args)
-    subscribers = db.get_all_subscribers()
+    users = db.get_all_users()
     
-    if not subscribers:
-        await update.message.reply_text("Нет подписчиков для рассылки.")
+    await send_broadcast(update, context, users, message_text, "всем пользователям")
+
+
+async def broadcast_without_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка пользователям без контакта"""
+    user_id = update.effective_user.id
+    
+    if user_id != config.ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     
-    # Отправка сообщения
+    if not context.args:
+        await update.message.reply_text(
+            "Использование: /broadcast_no_contact <текст сообщения>\n"
+            "Отправит сообщение только тем, кто НЕ оставил контакт"
+        )
+        return
+    
+    message_text = ' '.join(context.args)
+    users = db.get_users_without_contact()
+    
+    await send_broadcast(update, context, users, message_text, "пользователям без контакта")
+
+
+async def broadcast_with_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка пользователям с контактом"""
+    user_id = update.effective_user.id
+    
+    if user_id != config.ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "Использование: /broadcast_with_contact <текст сообщения>\n"
+            "Отправит сообщение только тем, кто оставил контакт"
+        )
+        return
+    
+    message_text = ' '.join(context.args)
+    users = db.get_users_with_contact()
+    
+    await send_broadcast(update, context, users, message_text, "пользователям с контактом")
+
+
+async def send_broadcast(update, context, users, message_text, description):
+    """Общая функция для рассылки"""
+    if not users:
+        await update.message.reply_text(f"Нет {description} для рассылки.")
+        return
+    
+    await update.message.reply_text(f"📤 Начинаю рассылку {len(users)} {description}...")
+    
     success_count = 0
     fail_count = 0
     
-    await update.message.reply_text(f"Начинаю рассылку {len(subscribers)} подписчикам...")
-    
-    for subscriber_id in subscribers:
+    for user_id in users:
         try:
             await context.bot.send_message(
-                chat_id=subscriber_id,
+                chat_id=user_id,
                 text=message_text
             )
             success_count += 1
         except TelegramError as e:
-            logger.error(f"Не удалось отправить сообщение пользователю {subscriber_id}: {e}")
+            logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
             fail_count += 1
     
     result_text = (
@@ -160,186 +452,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.message.reply_text(result_text)
-
-
-async def handle_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработчик медиа-файлов от админа
-    Показывает кнопки для подтверждения рассылки
-    """
-    user_id = update.effective_user.id
-    
-    logger.info(f"Получено медиа от пользователя {user_id}, ADMIN_ID={config.ADMIN_ID}")
-    
-    if user_id != config.ADMIN_ID:
-        logger.info(f"Пользователь {user_id} не является админом, пропускаем")
-        return
-    
-    logger.info("Админ отправил медиа, показываем кнопки подтверждения")
-    
-    # Сохраняем информацию о сообщении для последующей рассылки
-    context.user_data['broadcast_message'] = update.message.message_id
-    context.user_data['broadcast_chat'] = update.message.chat_id
-    
-    # Создаем кнопки для подтверждения
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, разослать", callback_data="broadcast_confirm"),
-            InlineKeyboardButton("❌ Нет", callback_data="broadcast_cancel")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    subscriber_count = db.get_subscriber_count()
-    
-    await update.message.reply_text(
-        f"📤 Разослать это сообщение {subscriber_count} подписчикам?",
-        reply_markup=reply_markup
-    )
-
-
-async def handle_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки подтверждения рассылки"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    logger.info(f"Нажата кнопка: {query.data} пользователем {user_id}")
-    
-    if user_id != config.ADMIN_ID:
-        logger.warning(f"Попытка доступа не админа: {user_id}")
-        await query.edit_message_text("У вас нет доступа к этой функции.")
-        return
-    
-    if query.data == "broadcast_cancel":
-        logger.info("Рассылка отменена админом")
-        await query.edit_message_text("❌ Рассылка отменена.")
-        # Очищаем сохраненные данные
-        context.user_data.pop('broadcast_message', None)
-        context.user_data.pop('broadcast_chat', None)
-        return
-    
-    if query.data == "broadcast_confirm":
-        # Получаем сохраненное сообщение
-        message_id = context.user_data.get('broadcast_message')
-        chat_id = context.user_data.get('broadcast_chat')
-        
-        logger.info(f"Подтверждена рассылка. Message ID: {message_id}, Chat ID: {chat_id}")
-        
-        if not message_id or not chat_id:
-            logger.error(f"Сообщение не найдено! message_id={message_id}, chat_id={chat_id}")
-            await query.edit_message_text("❌ Ошибка: сообщение не найдено.")
-            return
-        
-        subscribers = db.get_all_subscribers()
-        logger.info(f"Получено {len(subscribers)} подписчиков для рассылки")
-        
-        if not subscribers:
-            await query.edit_message_text("❌ Нет подписчиков для рассылки.")
-            return
-        
-        # Обновляем сообщение
-        await query.edit_message_text(f"📤 Начинаю рассылку {len(subscribers)} подписчикам...")
-        
-        success_count = 0
-        fail_count = 0
-        
-        for subscriber_id in subscribers:
-            try:
-                logger.info(f"Отправка подписчику {subscriber_id}...")
-                # Копируем сохраненное сообщение всем подписчикам
-                await context.bot.copy_message(
-                    chat_id=subscriber_id,
-                    from_chat_id=chat_id,
-                    message_id=message_id
-                )
-                success_count += 1
-                logger.info(f"✓ Успешно отправлено {subscriber_id}")
-            except TelegramError as e:
-                logger.error(f"✗ Не удалось отправить сообщение пользователю {subscriber_id}: {e}")
-                fail_count += 1
-        
-        result_text = (
-            f"✅ Рассылка завершена!\n\n"
-            f"Успешно: {success_count}\n"
-            f"Ошибок: {fail_count}"
-        )
-        
-        logger.info(f"Рассылка завершена. Успешно: {success_count}, Ошибок: {fail_count}")
-        await query.edit_message_text(result_text)
-        
-        # Очищаем сохраненные данные
-        context.user_data.pop('broadcast_message', None)
-        context.user_data.pop('broadcast_chat', None)
-
-
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений"""
-    user = update.effective_user
-    user_id = user.id
-    message_text = update.message.text.strip()
-    
-    # Проверяем кодовое слово
-    if message_text.lower() == config.CODE_WORD.lower():
-        # Проверяем, существует ли PDF файл
-        if not os.path.exists(config.PDF_FILE_PATH):
-            await update.message.reply_text(
-                "❌ Извините, файл пока недоступен. Обратитесь к администратору."
-            )
-            logger.error(f"PDF файл не найден: {config.PDF_FILE_PATH}")
-            return
-        
-        # Проверяем, новый ли это пользователь
-        is_new_user = db.add_user(
-            user_id=user_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name
-        )
-        
-        # Отправляем PDF файл
-        try:
-            with open(config.PDF_FILE_PATH, 'rb') as pdf_file:
-                await update.message.reply_document(
-                    document=pdf_file,
-                    caption="✅ Вот ваш файл! Вы также подписаны на нашу рассылку."
-                )
-            
-            if is_new_user:
-                logger.info(f"Новый пользователь добавлен: {user_id} (@{user.username})")
-                
-                # Уведомляем админа о новом пользователе
-                if config.ADMIN_ID:
-                    try:
-                        admin_notification = (
-                            f"🆕 Новый пользователь!\n\n"
-                            f"ID: {user_id}\n"
-                            f"Имя: {user.first_name or 'Не указано'}\n"
-                            f"Username: @{user.username or 'Не указано'}\n"
-                            f"Всего подписчиков: {db.get_subscriber_count()}"
-                        )
-                        await context.bot.send_message(
-                            chat_id=config.ADMIN_ID,
-                            text=admin_notification
-                        )
-                    except TelegramError as e:
-                        logger.error(f"Не удалось уведомить админа: {e}")
-            else:
-                logger.info(f"Существующий пользователь повторно ввёл код: {user_id}")
-                
-        except Exception as e:
-            logger.error(f"Ошибка при отправке файла: {e}")
-            await update.message.reply_text(
-                "❌ Произошла ошибка при отправке файла. Попробуйте позже."
-            )
-    else:
-        # Если сообщение не кодовое слово и не от админа
-        if user_id != config.ADMIN_ID:
-            await update.message.reply_text(
-                "🤔 Неверное кодовое слово. Попробуйте ещё раз или используйте /help."
-            )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -360,13 +472,11 @@ def main():
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
     application.add_handler(CommandHandler("id", check_id))
     application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("broadcast", broadcast))
-    
-    # Обработчик нажатий на кнопки
-    application.add_handler(CallbackQueryHandler(handle_broadcast_callback))
+    application.add_handler(CommandHandler("broadcast_all", broadcast_all))
+    application.add_handler(CommandHandler("broadcast_no_contact", broadcast_without_contact))
+    application.add_handler(CommandHandler("broadcast_with_contact", broadcast_with_contact))
     
     # Обработчик текстовых сообщений
     application.add_handler(MessageHandler(
@@ -374,14 +484,23 @@ def main():
         handle_message
     ))
     
-    # Обработчик медиа-сообщений от админа для рассылки
+    # Обработчик контактов
     application.add_handler(MessageHandler(
-        (filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.Document.ALL | filters.VOICE | filters.VIDEO_NOTE) & ~filters.COMMAND,
-        handle_admin_media
+        filters.CONTACT,
+        handle_contact_message
     ))
     
     # Обработчик ошибок
     application.add_error_handler(error_handler)
+    
+    # Функция для запуска фоновой задачи после инициализации
+    async def post_init(application: Application) -> None:
+        """Запускается после инициализации приложения"""
+        asyncio.create_task(check_warmup_users(application))
+        logger.info("Фоновая задача для догревов запущена")
+    
+    # Регистрируем функцию post_init
+    application.post_init = post_init
     
     # Запуск бота
     logger.info("Бот запущен!")
@@ -390,4 +509,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
