@@ -161,17 +161,46 @@ async def handle_antistress_code(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 
+def validate_phone_number(phone: str) -> bool:
+    """
+    Проверка корректности номера телефона
+    
+    Args:
+        phone: Номер телефона (уже очищенный от символов)
+        
+    Returns:
+        True если номер валидный
+    """
+    # Удаляем + в начале если есть
+    clean_phone = phone.lstrip('+')
+    
+    # Проверяем, что это только цифры
+    if not clean_phone.isdigit():
+        return False
+    
+    # Проверяем длину (10-12 цифр)
+    if len(clean_phone) < 10 or len(clean_phone) > 12:
+        return False
+    
+    # Если начинается с 7 или 8, должно быть 11 цифр
+    if clean_phone[0] in ['7', '8']:
+        return len(clean_phone) == 11
+    
+    return True
+
+
 def extract_contact_info(text: str) -> tuple:
     """
     Извлечение имени и телефона из текста
     
     Returns:
         (name, phone) или (None, None) если не найдено
+        (None, 'invalid') если формат номера неправильный
     """
     # Ищем номер телефона (различные форматы)
     phone_patterns = [
         r'\+?7[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}',  # +7 (xxx) xxx-xx-xx
-        r'\+?\d{11,14}',  # Просто цифры
+        r'\+?\d{10,12}',  # Просто цифры (10-12 символов)
         r'8[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}',  # 8 (xxx) xxx-xx-xx
     ]
     
@@ -187,17 +216,21 @@ def extract_contact_info(text: str) -> tuple:
     if not phone:
         return None, None
     
-    # Очищаем телефон
-    phone = re.sub(r'[\s\-\(\)]', '', phone)
+    # Очищаем телефон от лишних символов
+    clean_phone = re.sub(r'[\s\-\(\)]', '', phone)
+    
+    # Проверяем корректность номера
+    if not validate_phone_number(clean_phone):
+        return None, 'invalid'
     
     # Имя - это то, что осталось после удаления телефона
     # Очищаем от лишних символов и пробелов
     name = re.sub(r'[^\w\s\-А-Яа-яЁёA-Za-z]', '', text).strip()
     
     if not name:
-        return None, phone
+        return None, clean_phone
     
-    return name, phone
+    return name, clean_phone
 
 
 async def handle_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -232,6 +265,18 @@ async def handle_contact_message(update: Update, context: ContextTypes.DEFAULT_T
     # Обработка текстового сообщения с именем и телефоном
     if update.message.text:
         name, phone = extract_contact_info(update.message.text)
+        
+        # Проверка на неправильный формат номера
+        if phone == 'invalid':
+            await update.message.reply_text(
+                "❌ Неправильный формат номера телефона.\n\n"
+                "Пожалуйста, укажите номер в одном из форматов:\n"
+                "• +79991234567\n"
+                "• 89991234567\n"
+                "• 79991234567\n\n"
+                "Например: Иван Петров +79991234567"
+            )
+            return False
         
         if name and phone:
             db.save_contact(user_id, name, phone)
