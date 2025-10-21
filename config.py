@@ -13,6 +13,9 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 # ID админа (ваш Telegram ID)
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 
+# Username админа для связи (без @)
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', '')
+
 # Кодовое слово для получения PDF
 CODE_WORD = os.getenv('CODE_WORD', 'Антистресс')
 

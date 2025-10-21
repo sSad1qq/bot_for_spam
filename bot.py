@@ -55,11 +55,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📚 Доступные команды:\n\n"
         "/start - Начать работу с ботом\n"
-        "/help - Показать это сообщение\n\n"
+        "/help - Показать это сообщение\n"
+        "/contact - Связаться с администратором\n\n"
         "Введите кодовое слово **Антистресс**, чтобы получить полезные материалы."
     )
     
     await update.message.reply_text(help_text)
+
+
+async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать контакт администратора"""
+    if config.ADMIN_USERNAME:
+        message = (
+            "👤 Связаться с администратором:\n\n"
+            f"@{config.ADMIN_USERNAME}\n\n"
+            "Вы можете написать напрямую по этому контакту, "
+            "если у вас есть вопросы или нужна помощь."
+        )
+    else:
+        message = (
+            "📞 Для связи с администратором оставьте ваши контакты, "
+            "и мы свяжемся с вами в ближайшее время."
+        )
+    
+    await update.message.reply_text(message)
 
 
 async def check_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,7 +157,7 @@ async def handle_antistress_code(update: Update, context: ContextTypes.DEFAULT_T
     
     if not is_new_user:
         await update.message.reply_text(
-            "Вы уже получали материалы! Если у вас остались вопросы, напишите администратору."
+            "Вы уже получали материалы! Если у вас остались вопросы, используйте команду /contact для связи с администратором."
         )
         return
     
@@ -349,7 +368,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_info['contact_provided']:
                 await update.message.reply_text(
                     "Спасибо! Мы уже получили ваши контакты и скоро свяжемся с вами.\n\n"
-                    "Если у вас есть вопросы, можете написать администратору."
+                    "Если у вас есть вопросы, используйте команду /contact для связи с администратором."
                 )
             else:
                 # Контакт еще не предоставлен, даем подсказку
@@ -547,6 +566,7 @@ def main():
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("contact", contact_admin))
     application.add_handler(CommandHandler("id", check_id))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("broadcast_all", broadcast_all))
